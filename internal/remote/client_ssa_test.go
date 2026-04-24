@@ -16,6 +16,7 @@ package remote
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/splunk/qbec/internal/model"
@@ -231,4 +232,25 @@ func TestMaybeUpdateServerSideApplyDetectsIdenticalObjects(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, identicalObjects, result.SkipReason)
 	assert.Equal(t, apiTypes.ApplyPatchType, recorder.patchType)
+}
+
+func TestServerSideApplyStripsPristineAnnotation(t *testing.T) {
+	existing := newConfigMap("default", "ssa-config").ToUnstructured()
+	annotated, err := qbecPristine{}.createFromPristine(newConfigMap("default", "ssa-config"))
+	require.NoError(t, err)
+
+	client, recorder := newServerSideApplyClient(t, existing.DeepCopy())
+	_, err = client.serverSideApply(context.Background(), annotated, existing.DeepCopy(), SyncOptions{}, opUpdate)
+	require.NoError(t, err)
+
+	var patch map[string]interface{}
+	require.NoError(t, json.Unmarshal(recorder.patchData, &patch))
+
+	metadata, ok := patch["metadata"].(map[string]interface{})
+	require.True(t, ok)
+	annotations, ok := metadata["annotations"].(map[string]interface{})
+	if ok {
+		_, found := annotations[model.QbecNames.PristineAnnotation]
+		assert.False(t, found)
+	}
 }
