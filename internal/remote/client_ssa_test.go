@@ -16,6 +16,7 @@ package remote
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/splunk/qbec/internal/model"
@@ -142,6 +143,18 @@ func newConfigMap(namespace, name string) model.K8sLocalObject {
 	}, model.LocalAttrs{App: "app", Component: "comp", Env: "env"})
 }
 
+func newConfigMapWithData(namespace, name string, data map[string]interface{}) model.K8sLocalObject {
+	return model.NewK8sLocalObject(map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]interface{}{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"data": data,
+	}, model.LocalAttrs{App: "app", Component: "comp", Env: "env"})
+}
+
 func newGenerateNameConfigMap(namespace, generateName string) model.K8sLocalObject {
 	return model.NewK8sLocalObject(map[string]interface{}{
 		"apiVersion": "v1",
@@ -245,4 +258,75 @@ func TestMaybeUpdateServerSideApplyDetectsIdenticalObjects(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, identicalObjects, result.SkipReason)
 	assert.Equal(t, apiTypes.ApplyPatchType, recorder.patchType)
+}
+
+func TestMaybeUpdateServerSideApplyIgnoresControllerOwnedChanges(t *testing.T) {
+	existing := newConfigMap("default", "ssa-config").ToUnstructured()
+	out := existing.DeepCopy()
+	require.NoError(t, unstructured.SetNestedField(out.Object, map[string]interface{}{"state": "ready"}, "status"))
+	annotations := out.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations["controller.example.com/hash"] = "12345"
+	out.SetAnnotations(annotations)
+	out.SetFinalizers([]string{"controller.example.com/finalizer"})
+
+	client, _ := newServerSideApplyClient(t, out)
+	result, err := client.maybeUpdate(context.Background(), newConfigMap("default", "ssa-config"), existing.DeepCopy(), SyncOptions{
+		ApplyStrategy:   model.ApplyStrategyServer,
+		DisableUpdateFn: func(model.K8sMeta) bool { return false },
+	})
+	require.NoError(t, err)
+	assert.Equal(t, identicalObjects, result.SkipReason)
+}
+
+func TestMaybeUpdateServerSideApplyDetectsRemovedManagedFields(t *testing.T) {
+	existing := newConfigMapWithData("default", "ssa-config", map[string]interface{}{
+		"foo":   "bar",
+		"stale": "remove-me",
+	}).ToUnstructured()
+	existing.SetManagedFields([]metav1.ManagedFieldsEntry{
+		{
+			Manager:    ssaFieldManager,
+			Operation:  metav1.ManagedFieldsOperationApply,
+			FieldsType: "FieldsV1",
+			FieldsV1: &metav1.FieldsV1{
+				Raw: []byte(`{"f:data":{"f:foo":{},"f:stale":{}}}`),
+			},
+		},
+	})
+	out := newConfigMap("default", "ssa-config").ToUnstructured()
+
+	client, recorder := newServerSideApplyClient(t, out)
+	result, err := client.maybeUpdate(context.Background(), newConfigMap("default", "ssa-config"), existing.DeepCopy(), SyncOptions{
+		ApplyStrategy:   model.ApplyStrategyServer,
+		DisableUpdateFn: func(model.K8sMeta) bool { return false },
+	})
+	require.NoError(t, err)
+	assert.Empty(t, result.SkipReason)
+	assert.Equal(t, opUpdate, result.Operation)
+	assert.Equal(t, apiTypes.ApplyPatchType, recorder.patchType)
+}
+
+func TestServerSideApplyStripsApplyHistoryAnnotations(t *testing.T) {
+	obj := newConfigMap("default", "ssa-config")
+	annotated := cloneLocalObject(obj)
+	annotations := annotated.ToUnstructured().GetAnnotations()
+	annotations[model.QbecNames.PristineAnnotation] = "pristine"
+	annotations[kubectlLastConfig] = `{"apiVersion":"v1"}`
+	annotated.ToUnstructured().SetAnnotations(annotations)
+
+	client, recorder := newServerSideApplyClient(t, annotated.ToUnstructured())
+	_, err := client.serverSideApply(context.Background(), annotated, nil, SyncOptions{}, opUpdate)
+	require.NoError(t, err)
+
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(recorder.patchData, &payload))
+	gotAnnotations, found, err := unstructured.NestedStringMap(payload, "metadata", "annotations")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.NotContains(t, gotAnnotations, model.QbecNames.PristineAnnotation)
+	assert.NotContains(t, gotAnnotations, kubectlLastConfig)
+	assert.Equal(t, obj.Component(), gotAnnotations[model.QbecNames.ComponentAnnotation])
 }
