@@ -35,11 +35,10 @@ func newUnstructuredList(apiVersion, kind string, continueVal string, items ...*
 		Object: map[string]interface{}{
 			"apiVersion": apiVersion,
 			"kind":       kind,
-			"metadata": map[string]interface{}{
-				"continue": continueVal,
-			},
+			"metadata":   map[string]interface{}{},
 		},
 	}
+	list.SetContinue(continueVal)
 	for i := range items {
 		list.Items = append(list.Items, *items[i])
 	}
@@ -74,7 +73,7 @@ func TestListPagination(t *testing.T) {
 	tf.FakeDynamicClient = dynamicfakeclient.NewSimpleDynamicClientWithCustomListKinds(scheme.Scheme, listMapping)
 	var uns []*unstructured.Unstructured
 	var totalItemsInList = int64(3)
-	for i := int64(0); i <= totalItemsInList; i++ {
+	for i := int64(0); i < totalItemsInList; i++ {
 		ns := "default"
 		uns = append(uns, newUnstructured("v1", "Secret", ns, fmt.Sprintf("test-secret-%d", i)))
 	}
@@ -83,9 +82,8 @@ func TestListPagination(t *testing.T) {
 		if callIndex >= totalItemsInList {
 			return true, nil, errors.New("unexpected call to list. list has been served already")
 		}
-		remaining := totalItemsInList - callIndex - 1
 		continueToken := ""
-		if remaining > 0 {
+		if callIndex+1 < totalItemsInList {
 			continueToken = fmt.Sprintf("page-%d", callIndex+1)
 		}
 		listWithContinue := newUnstructuredList("v1", "SecretList", continueToken, uns[callIndex])
