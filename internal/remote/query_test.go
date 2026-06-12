@@ -30,7 +30,7 @@ import (
 	"k8s.io/kubectl/pkg/scheme"
 )
 
-func newUnstructuredList(apiVersion, kind string, continueVal int64, items ...*unstructured.Unstructured) *unstructured.UnstructuredList {
+func newUnstructuredList(apiVersion, kind string, continueVal string, items ...*unstructured.Unstructured) *unstructured.UnstructuredList {
 	list := &unstructured.UnstructuredList{
 		Object: map[string]interface{}{
 			"apiVersion": apiVersion,
@@ -83,7 +83,12 @@ func TestListPagination(t *testing.T) {
 		if callIndex >= totalItemsInList {
 			return true, nil, errors.New("unexpected call to list. list has been served already")
 		}
-		listWithContinue := newUnstructuredList("v1", "SecretList", totalItemsInList-callIndex-1, uns[callIndex])
+		remaining := totalItemsInList - callIndex - 1
+		continueToken := ""
+		if remaining > 0 {
+			continueToken = fmt.Sprintf("page-%d", callIndex+1)
+		}
+		listWithContinue := newUnstructuredList("v1", "SecretList", continueToken, uns[callIndex])
 		callIndex++
 		return true, listWithContinue, nil
 	})
@@ -111,7 +116,6 @@ func TestListPagination(t *testing.T) {
 	}
 	actual := len(objs)
 	if int(totalItemsInList) != actual {
-		t.Logf("expected items to be %d but found %d. Change this to Fatal when https://github.com/kubernetes/kubernetes/issues/107277 is fixed", totalItemsInList, actual)
 		t.Fatalf("expected items to be %d but found %d", totalItemsInList, actual)
 	}
 }
